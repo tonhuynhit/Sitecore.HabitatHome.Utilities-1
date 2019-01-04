@@ -1,5 +1,6 @@
 param(
-    $instance = "",
+    $instance = "habitathome.dev.local",
+    $identityServerUrl = "https://identityserver.habitathome.dev.local",
     [ValidateSet('xp', 'xc')]
     $demoType,
     $adminUser = "admin",
@@ -15,38 +16,71 @@ else {
 }
 Write-Host $instanceName
 
-Function Get-SitecoreSession {
+function Convert-FromBase64StringWithNoPadding([string]$data)
+{
+    $data = $data.Replace('-', '+').Replace('_', '/')
+    switch ($data.Length % 4)
+    {
+        0 { break }
+        2 { $data += '==' }
+        3 { $data += '=' }
+        default { throw New-Object ArgumentException('data') }
+    }
+    return [System.Convert]::FromBase64String($data)
+}
+Function Get-SitecoreToken {
     param(
         [Parameter(Mandatory = $true, Position = 0)]
-        [string]$site,
+        [string]$identityserverUrl,
         [Parameter(Mandatory = $true, Position = 1)]
         [string]$username,
         [Parameter(Mandatory = $true, Position = 2)]
         [string]$password
     )
-
-    # Login - to create web session with authorisation cookies
-    $loginPage = ("https://{0}/sitecore/login" -f $site)
-  
-    $login = Invoke-WebRequest $loginPage -SessionVariable webSession
-  
-    $form = $login.forms[0]
-    $form.fields["UserName"] = $username
-    $form.fields["Password"] = $password
-  
-    Write-Host ""
-    Write-Host "logging in"
-  
-    $request = Invoke-WebRequest -Uri $loginPage -WebSession $webSession -Method POST -Body $form | Out-Null
-	$cookies = $websession.Cookies.GetCookies($loginPage)
-	if ($cookies["sitecore_userticket"]){
-        Write-Host "login done"
-	    Write-Host ""
-		$webSession
-    }else{
-        Write-Host "login failed" -ForegroundColor Red
-        exit 2
+    $tokenendpointurl = $identityserverUrl + "/connect/token"
+    $granttype = "password" # client_credentials / password 
+    $client_id = "postman-api"
+    $client_secret = "ClientSecret"
+    $scope = "openid sitecore.profile sitecore.profile.api"
+    
+    $body = @{
+        grant_type = $granttype
+        scope = $scope
+        client_id = $client_id
+        client_secret = $client_secret    
+        username = $username
+        password = $password
     }
+    $headers = New-Object "System.Collections.Generic.Dictionary[[String],[String]]"
+    $headers.Add("Content-Type", 'application/x-www-form-urlencoded')
+    $headers.Add("Accept", 'application/json')
+
+    $resp = Invoke-RestMethod -Method Post -Body $body -Headers $headers -Uri $tokenendpointurl 
+    $parts = $resp.access_token.Split('.');
+
+    $baseDecoded = Convert-FromBase64StringWithNoPadding($parts[1])
+    $decoded = [System.Text.Encoding]::UTF8.GetString($baseDecoded)
+
+    Write-Host "`***** SUCCESSFULLY FETCHED TOKEN ***** `n" -foreground Green
+
+    Write-Host "`JWT payload: `n" -foreground Yellow
+    $decoded = $decoded | ConvertFrom-Json | ConvertTo-Json
+    Write-Host $decoded -foreground White
+
+    Write-Host
+    Write-Host "`ACCESSTOKEN: `n" -foreground Yellow
+    $access_token = $resp.access_token | Format-Table -Wrap | Out-String
+    Write-Host $access_token -foreground White
+    Write-Host   
+    return $access_token
+	# if ($cookies["sitecore_userticket"]){
+    #     Write-Host "login done"
+	#     Write-Host ""
+	# 	$webSession
+    # }else{
+    #     Write-Host "login failed" -ForegroundColor Red
+    #     exit 2
+    # }
 }
 
 Function RequestPage {
@@ -54,12 +88,17 @@ Function RequestPage {
         [Parameter(Mandatory = $true, Position = 0)]
         [string]$url,
         [Parameter(Mandatory = $true, Position = 1)]
-        [object]$webSession
+        [string]$access_token
     )
     Write-Host $(Get-Date -Format HH:mm:ss.fff)
     Write-Host "requesting $url ..."
+
+    $headers = New-Object "System.Collections.Generic.Dictionary[[String],[String]]"
+    $headers.Add("Authorization", ("Bearer {0}" -f $access_token))
+
     try { 
-		$request = Invoke-WebRequest $url -WebSession $webSession -TimeoutSec 60000
+        
+		$content = Invoke-WebRequest $url -Headers $headers -TimeoutSec 60000 | select -Expand Content
         Write-Host "Done" 
         return $true
 	} 
@@ -77,7 +116,7 @@ Function RequestPage {
 }
 
 $demoType = $demoType.ToLower()
-$session = Get-SitecoreSession $instanceName ("sitecore\{0}" -f $adminUser) $adminPassword
+$session = Get-SitecoreToken $identityServerUrl ("sitecore\{0}" -f $adminUser) $adminPassword
 $errors = 0
 
 Write-Host "Warming up XP Demo" -ForegroundColor Green
